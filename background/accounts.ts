@@ -1,5 +1,5 @@
 import { AnyAssetAmount } from "./assets"
-import { Network } from "./networks"
+import { EVMNetwork, Network } from "./networks"
 import { HexString } from "./types"
 
 /**
@@ -40,5 +40,5 @@ export type AccountBalance = {
  */
 export type AddressNetwork = {
   address: HexString
-  network: Network
+  network: EVMNetwork
 }
