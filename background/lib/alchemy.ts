@@ -1,3 +1,4 @@
+import { Provider } from "@ethersproject/abstract-provider"
 import {
   AlchemyProvider,
   AlchemyWebSocketProvider,
@@ -53,6 +54,12 @@ const alchemyGetAssetTransfersJTD = {
 const isValidAlchemyAssetTransferResponse = jtdValidatorFor(
   alchemyGetAssetTransfersJTD
 )
+
+export function isAlchemyProvider(
+  provider: Provider
+): provider is AlchemyProvider {
+  return "apiKey" in provider && "isCommunityResource" in provider
+}
 
 /**
  * Use Alchemy's getAssetTransfers call to get historical transfers for an
