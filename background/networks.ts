@@ -231,6 +231,10 @@ export type BlockPrices = {
    * transaction using those parameters will be included in the next block.
    */
   estimatedPrices: BlockEstimate[]
+  /**
+   * Whether these prices were estimated locally or via a third party provider
+   */
+  dataSource: "local" | "blocknative"
 }
 
 /**
