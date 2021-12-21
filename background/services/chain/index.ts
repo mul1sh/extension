@@ -10,6 +10,7 @@ import { utils } from "ethers"
 
 import logger from "../../lib/logger"
 import getBlockPrices from "../../lib/gas"
+import { sameEVMAddress } from "../../lib/utils"
 import { HexString } from "../../types"
 import { AccountBalance, AddressNetwork } from "../../accounts"
 import {
@@ -108,15 +109,17 @@ export default class ChainService extends BaseService<Events> {
 
   websocketProviders: { [networkName: string]: AlchemyWebSocketProvider }
 
-  subscribedAccounts: {
-    account: HexString
+  subscribedAddressNetworks: {
+    addressNetwork: AddressNetwork
     provider: WebSocketProvider
   }[]
 
   subscribedNetworks: {
-    network: EVMNetwork
-    provider: WebSocketProvider
-  }[]
+    [chainID: string]: {
+      network: EVMNetwork
+      provider: WebSocketProvider
+    }
+  }
 
   /**
    * FIFO queues of transaction hashes per network that should be retrieved and cached.
@@ -205,8 +208,8 @@ export default class ChainService extends BaseService<Events> {
       {}
     )
 
-    this.subscribedAccounts = []
-    this.subscribedNetworks = []
+    this.subscribedAddressNetworks = []
+    this.subscribedNetworks = {}
   }
 
   async internalStartService(): Promise<void> {
@@ -228,11 +231,18 @@ export default class ChainService extends BaseService<Events> {
         await this.db.addBlock(block)
       })
     )
-    // subscribe to new blocks for all networks
+    // subscribe to new blocks for all accounts we're tracking
     Promise.all(
-      SUPPORTED_NETWORKS.map(async (network) =>
-        this.subscribeToNewHeads(network)
-      )
+      Object.values(
+        accounts.reduce(
+          (acc: { [name: string]: EVMNetwork }, addressNetwork) => {
+            const { network } = addressNetwork
+            acc[network.chainID.toLowerCase()] = network
+            return acc
+          },
+          {}
+        )
+      ).map((network) => this.subscribeToNewHeads(network))
     )
 
     Promise.all(
@@ -304,6 +314,7 @@ export default class ChainService extends BaseService<Events> {
   async addAccountToTrack(addressNetwork: AddressNetwork): Promise<void> {
     await this.db.addAccountToTrack(addressNetwork)
     this.emitter.emit("newAccountToTrack", addressNetwork)
+    this.subscribeToNewHeads(addressNetwork.network)
     this.getLatestBaseAccountBalance(addressNetwork)
     this.subscribeToAccountTransactions(addressNetwork)
     this.loadRecentAssetTransfers(addressNetwork)
@@ -460,10 +471,12 @@ export default class ChainService extends BaseService<Events> {
    */
   async pollBlockPrices(): Promise<void> {
     await Promise.allSettled(
-      this.subscribedNetworks.map(async ({ network, provider }) => {
-        const blockPrices = await getBlockPrices(network, provider)
-        this.emitter.emit("blockPrices", blockPrices)
-      })
+      Object.values(this.subscribedNetworks).map(
+        async ({ network, provider }) => {
+          const blockPrices = await getBlockPrices(network, provider)
+          this.emitter.emit("blockPrices", blockPrices)
+        }
+      )
     )
   }
 
@@ -576,7 +589,7 @@ export default class ChainService extends BaseService<Events> {
     startBlock: bigint,
     endBlock: bigint
   ): Promise<void> {
-    const { address, network } = addressNetwork
+    const { network } = addressNetwork
 
     // TODO only works on Ethereum today
     if (network.chainID !== ETHEREUM.chainID) {
@@ -617,8 +630,10 @@ export default class ChainService extends BaseService<Events> {
   }
 
   private async handleQueuedTransactionAlarm(): Promise<void> {
-    this.subscribedNetworks.forEach(({ network }) =>
-      this.handleQueuedNetworkTransactions(network)
+    await Promise.allSettled(
+      Object.values(this.subscribedNetworks).map(({ network }) =>
+        this.handleQueuedNetworkTransactions(network)
+      )
     )
   }
 
@@ -742,25 +757,27 @@ export default class ChainService extends BaseService<Events> {
    * @param network The EVM network to watch.
    */
   private async subscribeToNewHeads(network: EVMNetwork): Promise<void> {
-    const provider = this.requireWebsocketProvider(network)
-    // eslint-disable-next-line no-underscore-dangle
-    await provider._subscribe(
-      "newHeadsSubscriptionID",
-      ["newHeads"],
-      async (result: unknown) => {
-        // add new head to database
-        const block = blockFromWebsocketBlock(result, network)
-        await this.db.addBlock(block)
-        // emit the new block, don't wait to settle
-        this.emitter.emit("block", block)
-        // TODO if it matches a known blockheight and the difficulty is higher,
-        // emit a reorg event
+    if (!(network.chainID in this.subscribedNetworks)) {
+      const provider = this.requireWebsocketProvider(network)
+      // eslint-disable-next-line no-underscore-dangle
+      await provider._subscribe(
+        "newHeadsSubscriptionID",
+        ["newHeads"],
+        async (result: unknown) => {
+          // add new head to database
+          const block = blockFromWebsocketBlock(result, network)
+          await this.db.addBlock(block)
+          // emit the new block, don't wait to settle
+          this.emitter.emit("block", block)
+          // TODO if it matches a known blockheight and the difficulty is higher,
+          // emit a reorg event
+        }
+      )
+      this.subscribedNetworks[network.chainID] = {
+        network,
+        provider,
       }
-    )
-    this.subscribedNetworks.push({
-      network,
-      provider,
-    })
+    }
   }
 
   /**
@@ -772,31 +789,40 @@ export default class ChainService extends BaseService<Events> {
     addressNetwork: AddressNetwork
   ): Promise<void> {
     const { address, network } = addressNetwork
-    const provider = this.requireWebsocketProvider(network)
-    // eslint-disable-next-line no-underscore-dangle
-    await provider._subscribe(
-      "filteredNewFullPendingTransactionsSubscriptionID",
-      [
-        "alchemy_filteredNewFullPendingTransactions",
-        { address: addressNetwork.address },
-      ],
-      async (result: unknown) => {
-        // TODO use proper provider string
-        // handle incoming transactions for an account
-        try {
-          await this.saveTransaction(
-            transactionFromAlchemyWebsocketTransaction(result, ETH, network),
-            "alchemy"
-          )
-        } catch (error) {
-          logger.error(`Error saving tx: ${result}`, error)
+
+    if (
+      !this.subscribedAddressNetworks.find(
+        (an) =>
+          sameEVMAddress(address, an.addressNetwork.address) &&
+          network.name === an.addressNetwork.network.name
+      )
+    ) {
+      const provider = this.requireWebsocketProvider(network)
+      // eslint-disable-next-line no-underscore-dangle
+      await provider._subscribe(
+        "filteredNewFullPendingTransactionsSubscriptionID",
+        [
+          "alchemy_filteredNewFullPendingTransactions",
+          { address: addressNetwork.address },
+        ],
+        async (result: unknown) => {
+          // TODO use proper provider string
+          // handle incoming transactions for an account
+          try {
+            await this.saveTransaction(
+              transactionFromAlchemyWebsocketTransaction(result, ETH, network),
+              "alchemy"
+            )
+          } catch (error) {
+            logger.error(`Error saving tx: ${result}`, error)
+          }
         }
-      }
-    )
-    this.subscribedAccounts.push({
-      account: address,
-      provider,
-    })
+      )
+      this.subscribedAddressNetworks.push({
+        addressNetwork,
+        provider,
+      })
+    }
   }
 
   /**
