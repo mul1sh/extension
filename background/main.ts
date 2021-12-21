@@ -30,7 +30,6 @@ import { EIP1559TransactionRequest, SignedEVMTransaction } from "./networks"
 import rootReducer from "./redux-slices"
 import {
   loadAccount,
-  blockSeen,
   updateAccountBalance,
   updateENSName,
   updateENSAvatar,
@@ -44,6 +43,7 @@ import {
   keyringUnlocked,
   updateKeyrings,
 } from "./redux-slices/keyrings"
+import { blockSeen } from "./redux-slices/networks"
 import {
   initializationLoadingTimeHitLimit,
   emitter as uiSliceEmitter,
